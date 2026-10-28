@@ -72,7 +72,8 @@ from .discovery import (
 )
 from .lib.ble.device import UNILED_TRANSPORT_BLE, UniledBleDevice, UniledBleModel
 from .lib.discovery import UNILED_DISCOVERY_SOURCE_DHCP, UniledDiscovery
-from .lib.net.device import UNILED_TRANSPORT_NET, UniledNetDevice
+from .lib.mac import canonical_mac, same_mac
+from .lib.net.device import UNILED_TRANSPORT_NET
 from .lib.zng.cloud import MAGICHUE_DEFAULT_COUNTRY, MagicHue
 from .lib.zng.manager import (
     CONF_ZNG_ACTIVE_SCAN as CONF_ACTIVE_SCAN,
@@ -561,24 +562,33 @@ class UniledConfigFlowHandler(UniledMeshHandler, flow.ConfigFlow, domain=DOMAIN)
 
         await self.async_set_unique_id(mac)
 
-        for entry in self._async_current_entries(include_ignore=True):
-            # Skip if not an existing entry with a mac (in range) of the discovered device
-            if not (
-                entry.unique_id
-                and ":" in entry.unique_id
-                and UniledNetDevice.mac_matches_by_two(entry.unique_id, mac)
-            ):
+        entries = sorted(
+            self._async_current_entries(include_ignore=True),
+            key=lambda entry: entry.data.get(CONF_TRANSPORT) != UNILED_TRANSPORT_NET,
+        )
+        for entry in entries:
+            # Adjacent MACs can belong to different physical controllers.
+            if not same_mac(entry.unique_id, mac):
                 continue
 
-            # We don't (currently) support multhomed devices
-            if entry.unique_id != mac:
-                _LOGGER.warning("MAC Address mismatch %s != %s", mac, entry.unique_id)
-                raise AbortFlow("mac_mismatch")
+            if entry.source == flow.SOURCE_IGNORE:
+                raise AbortFlow("already_configured")
 
-            if (
-                entry.source == flow.SOURCE_IGNORE
-                or entry.data.get(CONF_TRANSPORT) != device[ATTR_UL_TRANSPORT]
-            ):
+            if entry.data.get(CONF_TRANSPORT) != device[ATTR_UL_TRANSPORT]:
+                if (
+                    entry.data.get(CONF_TRANSPORT) == UNILED_TRANSPORT_BLE
+                    and device[ATTR_UL_MODEL_NAME] == "SP530E"
+                    and entry.data.get(CONF_MODEL) == "SP530E"
+                    and entry.disabled_by is None
+                ):
+                    # Reuse the existing entry ID so its entity IDs survive the
+                    # upgrade from BLE-only to the preferred network transport.
+                    data_updates: dict[str, Any] = {}
+                    async_populate_data_from_discovery({}, data_updates, device)
+                    self.hass.config_entries.async_update_entry(
+                        entry, data={**entry.data, **data_updates}
+                    )
+                    self.hass.config_entries.async_schedule_reload(entry.entry_id)
                 raise AbortFlow("already_configured")
 
             if (
@@ -728,13 +738,18 @@ class UniledConfigFlowHandler(UniledMeshHandler, flow.ConfigFlow, domain=DOMAIN)
             self._discovered_ble_devices[discovery.address] = discovery
         else:
             current_addresses = self._async_current_ids()
+            current_macs = {
+                normalized
+                for address in current_addresses
+                if (normalized := canonical_mac(address)) is not None
+            }
 
             for discovery in await async_discover_devices(
                 self.hass, UNILED_DISCOVERY_SCAN_TIMEOUT
             ):
                 mac_address = discovery[ATTR_UL_MAC_ADDRESS]
                 mac = dr.format_mac(mac_address)
-                if mac_address in current_addresses or mac in current_addresses:
+                if canonical_mac(mac) in current_macs:
                     continue
                 self._discovered_net_devices[mac_address] = discovery
 
@@ -756,8 +771,11 @@ class UniledConfigFlowHandler(UniledMeshHandler, flow.ConfigFlow, domain=DOMAIN)
                     continue
 
                 if (
-                    discovery.address in current_addresses
-                    or discovery.address in self._discovered_net_devices
+                    canonical_mac(discovery.address) in current_macs
+                    or any(
+                        same_mac(discovery.address, address)
+                        for address in self._discovered_net_devices
+                    )
                     or discovery.address in self._discovered_ble_devices
                     or (
                         model := UniledBleDevice.match_known_device(
@@ -838,8 +856,15 @@ class UniledConfigFlowHandler(UniledMeshHandler, flow.ConfigFlow, domain=DOMAIN)
                 discovery.device, discovery.advertisement
             )
         ) is not None:
+            # Bluetooth and Wi-Fi discovery can format the same address differently.
+            # Never create another entry solely because of case or separators.
+            if any(
+                same_mac(entry.unique_id, discovery.address)
+                for entry in self._async_current_entries(include_ignore=True)
+            ):
+                raise AbortFlow("already_configured")
             await self.async_set_unique_id(
-                discovery.address, raise_on_progress=raise_on_progress
+                dr.format_mac(discovery.address), raise_on_progress=raise_on_progress
             )
             self._abort_if_unique_id_configured()
             self.context[CONF_TRANSPORT] = UNILED_TRANSPORT_BLE

@@ -65,9 +65,12 @@ from .discovery import (
 from .lib.ble.device import (
     UNILED_TRANSPORT_BLE,
     UniledBleDevice,
+    UniledBleModel,
     close_stale_connections,
     get_device,
 )
+from .lib.hybrid import HybridDevice
+from .lib.mac import same_mac
 from .lib.net.device import UNILED_TRANSPORT_NET, UniledNetDevice
 from .lib.zng.manager import (
     CONF_ZNG_ACTIVE_SCAN as CONF_ACTIVE_SCAN,
@@ -218,7 +221,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
         if entry.unique_id and (mac := discovery.get(ATTR_UL_MAC_ADDRESS)):
             mac = dr.format_mac(cast(str, mac))
-            if entry.unique_id != mac:
+            if not same_mac(entry.unique_id, mac):
                 raise ConfigEntryNotReady(
                     f"Unexpected device found at {host}; Expected "
                     f"{entry.unique_id}, found "
@@ -229,6 +232,35 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         if not uniled.model:
             raise ConfigEntryError(f"Could not resolve model for device {host}")
         uniled.discovery = discovery
+
+        if uniled.model_name == "SP530E" and entry.unique_id:
+            address = str(entry.unique_id).upper()
+
+            async def _async_create_ble_fallback() -> UniledBleDevice | None:
+                """Create a fallback only from this controller's advertisement."""
+                info = bluetooth.async_last_service_info(hass, address, connectable=True)
+                if not info:
+                    return None
+                model = UniledBleDevice.match_known_device(info.device, info.advertisement)
+                if not isinstance(model, UniledBleModel) or model.model_name != "SP530E":
+                    return None
+                return UniledBleDevice(entry.options, info.device, info.advertisement, "SP530E")
+
+            hybrid = HybridDevice(uniled, _async_create_ble_fallback)
+
+            @callback
+            def _async_update_fallback(service_info, change) -> None:
+                hybrid.update_advertisement(service_info)
+
+            entry.async_on_unload(
+                bluetooth.async_register_callback(
+                    hass,
+                    _async_update_fallback,
+                    BluetoothCallbackMatcher({ADDRESS: address}),
+                    bluetooth.BluetoothScanningMode.PASSIVE,
+                )
+            )
+            uniled = hybrid
 
     else:
         raise ConfigEntryError(
