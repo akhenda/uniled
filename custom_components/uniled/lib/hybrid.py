@@ -10,6 +10,7 @@ from typing import Any
 
 _LOGGER = logging.getLogger(__name__)
 NETWORK_RETRY_SECONDS = 120
+BLE_UPDATE_TIMEOUT_SECONDS = 20
 
 
 class HybridDevice:
@@ -83,9 +84,14 @@ class HybridDevice:
             self._unregister.append(fallback.register_callback(self._fire_callbacks))
         return self._fallback
 
-    async def _try_update(self, device, retry) -> bool:
+    async def _try_update(self, device, retry, timeout=None) -> bool:
         try:
-            return bool(await device.update(retry))
+            async with asyncio.timeout(timeout):
+                return bool(await device.update(retry))
+        except TimeoutError:
+            _LOGGER.warning("%s: Transport update timed out", device.name)
+            await device.stop()
+            return False
         except Exception:  # transport failures should allow the other link to run
             _LOGGER.warning("%s: Transport update failed", device.name, exc_info=True)
             return False
@@ -105,7 +111,9 @@ class HybridDevice:
                 self._next_network_attempt = time.monotonic() + NETWORK_RETRY_SECONDS
 
             fallback = await self._get_fallback()
-            if fallback is not None and await self._try_update(fallback, retry):
+            if fallback is not None and await self._try_update(
+                fallback, retry, BLE_UPDATE_TIMEOUT_SECONDS
+            ):
                 if self._active is not fallback:
                     _LOGGER.info("%s: Using Bluetooth fallback", self._network.name)
                 self._active = fallback

@@ -238,13 +238,15 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
             async def _async_create_ble_fallback() -> UniledBleDevice | None:
                 """Create a fallback only from this controller's advertisement."""
+                ble_device = bluetooth.async_ble_device_from_address(hass, address, True)
                 info = bluetooth.async_last_service_info(hass, address, connectable=True)
-                if not info:
+                # Last-service info can outlive a discoverable, connectable device.
+                if not ble_device or not info:
                     return None
-                model = UniledBleDevice.match_known_device(info.device, info.advertisement)
+                model = UniledBleDevice.match_known_device(ble_device, info.advertisement)
                 if not isinstance(model, UniledBleModel) or model.model_name != "SP530E":
                     return None
-                return UniledBleDevice(entry.options, info.device, info.advertisement, "SP530E")
+                return UniledBleDevice(entry.options, ble_device, info.advertisement, "SP530E")
 
             hybrid = HybridDevice(uniled, _async_create_ble_fallback)
 

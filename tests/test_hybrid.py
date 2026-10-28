@@ -1,6 +1,7 @@
 """Exercise failover without requiring Home Assistant or physical radios."""
 
 import importlib.util
+import asyncio
 from pathlib import Path
 import unittest
 
@@ -79,3 +80,27 @@ class HybridTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(await device.update())
         self.assertFalse(device.available)
         await device.shutdown()
+
+    async def test_fallback_timeout_does_not_hold_the_transport_lock(self):
+        network = Device("net", [False])
+        fallback = Device("ble", [])
+
+        async def stalled_update(retry=None):
+            await asyncio.sleep(1)
+            return True
+
+        fallback.update = stalled_update
+
+        async def make_fallback():
+            return fallback
+
+        device = hybrid.HybridDevice(network, make_fallback)
+        original_timeout = hybrid.BLE_UPDATE_TIMEOUT_SECONDS
+        hybrid.BLE_UPDATE_TIMEOUT_SECONDS = 0.01
+        try:
+            self.assertFalse(await device.update())
+            self.assertFalse(device.available)
+            self.assertGreaterEqual(fallback.stops, 1)
+            await asyncio.wait_for(device.stop(), 0.1)
+        finally:
+            hybrid.BLE_UPDATE_TIMEOUT_SECONDS = original_timeout
