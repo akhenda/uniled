@@ -14,6 +14,7 @@ package.__path__ = [str(ROOT)]
 sys.modules.setdefault("uniled", package)
 
 from uniled.lib.discovery import CONF_TO_DISCOVERY  # noqa: E402
+from uniled.lib.mac import same_mac  # noqa: E402
 from uniled.lib.net import scanner  # noqa: E402
 
 # Captured from an SP530E ("MB Curtain") answering a unicast probe.
@@ -170,7 +171,14 @@ scope = {
     "_LOGGER": SimpleNamespace(debug=lambda *_: None),
     "dr": SimpleNamespace(format_mac=lambda value: value.lower()),
     "UniledDevice": SimpleNamespace(human_readable_name=lambda _self, name, mac: name),
-    "same_mac": lambda a, b: a.lower() == b.lower(),
+    "same_mac": same_mac,
+    "DOMAIN": "uniled",
+    "UNILED_DISCOVERY": "uniled_discovery",
+    "CONF_ADDRESS": "address",
+    "CONF_RETRY_COUNT": "retry_count",
+    "CONF_UPDATE_INTERVAL": "update_interval",
+    "DEFAULT_RETRY_COUNT": 3,
+    "DEFAULT_UPDATE_INTERVAL": 30,
     "AbortFlow": AbortFlow,
     "ConfigEntryState": State,
     "flow": SimpleNamespace(SOURCE_IGNORE="ignore", ConfigEntryState=State),
@@ -183,9 +191,17 @@ for path, names in (
             "async_update_entry_from_discovery",
             "async_populate_data_from_discovery",
             "async_name_from_discovery",
+            "async_cached_sp530e",
         },
     ),
-    (ROOT / "config_flow.py", {"_async_network_discovery"}),
+    (
+        ROOT / "config_flow.py",
+        {
+            "_async_network_discovery",
+            "_async_bluetooth_create_entry",
+            "_async_network_create_entry",
+        },
+    ),
 ):
     exec(
         compile(ast.fix_missing_locations(functions(path, names)), str(path), "exec"),
@@ -193,8 +209,24 @@ for path, names in (
     )
 
 
+KIDS_BATH = {
+    "transport": "net",
+    "source": "UDP",
+    "mac_address": "F0:F5:BD:C4:A2:16",
+    "ip_address": "10.10.30.174",
+    "local_name": "Kids Bath",
+    "model_code": 78,
+    "model_name": "SP530E",
+}
+
+
 class Flow:
     _async_network_discovery = scope["_async_network_discovery"]
+    _async_bluetooth_create_entry = scope["_async_bluetooth_create_entry"]
+    _async_network_create_entry = scope["_async_network_create_entry"]
+
+    def async_create_entry(self, **kwargs):
+        return kwargs
 
     def __init__(self, entries, device):
         self._discovered_device = device
@@ -239,6 +271,47 @@ class HostUpdateTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(existing.data["host"], "10.10.30.126")
         self.assertEqual(existing.unique_id, "e8:06:90:69:09:ee")
         self.assertEqual(handler.hass.config_entries.reloaded, ["stable"])
+
+    async def test_ble_only_sp530e_converts_whatever_model_it_stored(self):
+        existing = SimpleNamespace(
+            unique_id="f0:f5:bd:c4:a2:16",
+            entry_id="kids",
+            source="bluetooth",
+            disabled_by=None,
+            title="Kids Bath",
+            state=State.LOADED,
+            data={"transport": "ble", "address": "F0:F5:BD:C4:A2:16", "model": None},
+        )
+        handler = Flow([existing], dict(KIDS_BATH))
+        with self.assertRaisesRegex(AbortFlow, "already_configured"):
+            await handler._async_network_discovery()
+        self.assertEqual(existing.data["transport"], "net")
+        self.assertEqual(existing.data["model"], "SP530E")
+        self.assertEqual(existing.data["host"], "10.10.30.174")
+        self.assertEqual(handler.hass.config_entries.reloaded, ["kids"])
+
+
+class BluetoothConfirmTests(unittest.TestCase):
+    def flow(self, sweep):
+        handler = Flow([], None)
+        handler.hass.data = {"uniled": {"uniled_discovery": sweep}}
+        handler.context = {
+            "transport": "ble",
+            "address": "F0:F5:BD:C4:A2:16",
+            "model": None,
+            "title_placeholders": {"name": "Kids Bath"},
+        }
+        return handler
+
+    def test_ble_card_for_swept_sp530e_creates_network_entry(self):
+        result = self.flow([dict(KIDS_BATH)])._async_bluetooth_create_entry()
+        self.assertEqual(result["data"]["transport"], "net")
+        self.assertEqual(result["data"]["host"], "10.10.30.174")
+        self.assertEqual(result["data"]["model"], "SP530E")
+
+    def test_ble_card_without_sweep_match_stays_ble(self):
+        result = self.flow([])._async_bluetooth_create_entry()
+        self.assertEqual(result["data"]["transport"], "ble")
 
 
 if __name__ == "__main__":

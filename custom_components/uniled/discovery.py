@@ -31,6 +31,7 @@ from .const import (
 )
 from .lib.device import UniledDevice
 from .lib.discovery import CONF_TO_DISCOVERY, UniledDiscovery
+from .lib.mac import same_mac
 from .lib.net.scanner import UniledNetScanner
 
 _LOGSCAN = logging.getLogger("uniled_scanner")
@@ -184,6 +185,10 @@ async def async_discover_devices(
 
     if not address:
         _LOGGER.debug("Scanning complete")
+        if hass:
+            hass.data.setdefault(DOMAIN, {})[
+                UNILED_DISCOVERY
+            ] = scanner.get_device_info()
         return scanner.get_device_info()
 
     _LOGSCAN.debug("Probe complete %s", scanner.get_device_info())
@@ -222,6 +227,17 @@ def async_trigger_discovery(
             context={"source": config_entries.SOURCE_INTEGRATION_DISCOVERY},
             data={**device},
         )
+
+
+@callback
+def async_cached_sp530e(hass: HomeAssistant, mac: str) -> UniledDiscovery | None:
+    """Return the SP530E with this MAC from the last scan; None if not seen."""
+    for device in hass.data.get(DOMAIN, {}).get(UNILED_DISCOVERY) or []:
+        if device[ATTR_UL_MODEL_NAME] == "SP530E" and same_mac(
+            device[ATTR_UL_MAC_ADDRESS], mac
+        ):
+            return device
+    return None
 
 
 @callback

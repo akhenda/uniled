@@ -62,9 +62,11 @@ from .const import (
 from .coordinator import UniledUpdateCoordinator
 from .discovery import (
     async_build_cached_discovery,
+    async_cached_sp530e,
     async_clear_discovery_cache,
     async_discover_device,
     async_discover_devices,
+    async_populate_data_from_discovery,
     async_request_rescan,
     async_trigger_discovery,
 )
@@ -182,6 +184,16 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Set up UNILED from a config entry."""
+    if entry.data.get(CONF_TRANSPORT) == UNILED_TRANSPORT_BLE:
+        if hass.data.get(DOMAIN, {}).get(UNILED_DISCOVERY) is None:
+            async_request_rescan(hass)
+        elif device := async_cached_sp530e(hass, entry.data[CONF_ADDRESS]):
+            # Seen on the network: set up as network with BLE fallback, same entry ID.
+            data_updates: dict[str, Any] = {}
+            async_populate_data_from_discovery({}, data_updates, device)
+            hass.config_entries.async_update_entry(
+                entry, data={**entry.data, **data_updates}
+            )
     transport: str = entry.data.get(CONF_TRANSPORT)
 
     if transport == UNILED_TRANSPORT_ZNG:

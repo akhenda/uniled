@@ -64,6 +64,7 @@ from .const import (
 )
 from .coordinator import UniledUpdateCoordinator
 from .discovery import (
+    async_cached_sp530e,
     async_discover_device,
     async_discover_devices,
     async_name_from_discovery,
@@ -577,8 +578,9 @@ class UniledConfigFlowHandler(UniledMeshHandler, flow.ConfigFlow, domain=DOMAIN)
             if entry.data.get(CONF_TRANSPORT) != device[ATTR_UL_TRANSPORT]:
                 if (
                     entry.data.get(CONF_TRANSPORT) == UNILED_TRANSPORT_BLE
+                    # The reply identifies the controller; the BLE path may have
+                    # stored no model or another name for it.
                     and device[ATTR_UL_MODEL_NAME] == "SP530E"
-                    and entry.data.get(CONF_MODEL) == "SP530E"
                     and entry.disabled_by is None
                 ):
                     # Reuse the existing entry ID so its entity IDs survive the
@@ -882,6 +884,9 @@ class UniledConfigFlowHandler(UniledMeshHandler, flow.ConfigFlow, domain=DOMAIN)
 
     def _async_bluetooth_create_entry(self):
         """Create bluetooth entry."""
+        # An SP530E also seen on the network gets a network entry with BLE fallback.
+        if device := async_cached_sp530e(self.hass, self.context.get(CONF_ADDRESS, "")):
+            return self._async_network_create_entry(device)
         return self.async_create_entry(
             title=self.context["title_placeholders"]["name"],
             data={
