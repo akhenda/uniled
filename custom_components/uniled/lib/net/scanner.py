@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import contextlib
 import ipaddress
 import logging
 import select
@@ -272,9 +271,14 @@ class UniledNetScanner:
                 await asyncio.sleep(timeout / 2)
         finally:
             receiver.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
+            try:
                 await receiver
-            sock.close()
+            except asyncio.CancelledError:
+                # Swallow only the receiver's cancellation, never our own.
+                if asyncio.current_task().cancelling():
+                    raise
+            finally:
+                sock.close()
         return self.found_devices
 
     @property

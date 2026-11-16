@@ -113,12 +113,15 @@ def _discovery_networks(value: list[str]) -> list:
 
 CONFIG_SCHEMA = vol.Schema(
     {
-        vol.Optional(DOMAIN): vol.Schema(
-            {
-                vol.Optional(CONF_DISCOVERY_NETWORKS, default=[]): vol.All(
-                    cv.ensure_list, [cv.string], _discovery_networks
-                )
-            }
+        vol.Optional(DOMAIN): vol.Any(
+            None,
+            vol.Schema(
+                {
+                    vol.Optional(CONF_DISCOVERY_NETWORKS, default=[]): vol.All(
+                        cv.ensure_list, [cv.string], _discovery_networks
+                    )
+                }
+            ),
         )
     },
     extra=vol.ALLOW_EXTRA,
@@ -140,17 +143,23 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
             hass, await async_discover_devices(hass, UNILED_DISCOVERY_SCAN_TIMEOUT)
         )
 
-    networks = config.get(DOMAIN, {}).get(CONF_DISCOVERY_NETWORKS, [])
+    networks = (config.get(DOMAIN) or {}).get(CONF_DISCOVERY_NETWORKS, [])
     domain_data = hass.data.setdefault(DOMAIN, {})
     domain_data[CONF_DISCOVERY_NETWORKS] = networks
     if networks:
-        domain_data[UNILED_RESCAN] = Debouncer(
+        rescan = domain_data[UNILED_RESCAN] = Debouncer(
             hass,
             _LOGGER,
             cooldown=UNILED_RESCAN_COOLDOWN,
             immediate=True,
             function=_async_discovery,
         )
+
+        @callback
+        def _async_stop_rescan(_: Event) -> None:
+            rescan.async_shutdown()
+
+        hass.bus.async_listen_once(EVENT_HOMEASSISTANT_STOP, _async_stop_rescan)
 
     @callback
     def _async_start_background_discovery(*_: Any) -> None:

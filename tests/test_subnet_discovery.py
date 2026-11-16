@@ -96,6 +96,24 @@ class SweepTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(found[0]["local_name"], "MB Curtain")
         self.assertEqual(found[0]["model_code"], 0x4E)
 
+    async def test_cancelling_the_sweep_propagates_and_closes_socket(self):
+        sock = Sock()
+
+        async def recvfrom(_sock, _size):
+            await asyncio.Event().wait()
+
+        asyncio.get_running_loop().sock_recvfrom = recvfrom
+        sweep = scanner.UniledNetScanner()
+        sweep._create_socket = lambda: sock
+        task = asyncio.ensure_future(
+            sweep.async_sweep(scanner.parse_discovery_networks(["10.10.30.1/32"]), 10)
+        )
+        await asyncio.sleep(0.01)
+        task.cancel()
+        with self.assertRaises(asyncio.CancelledError):
+            await task
+        self.assertTrue(sock.closed)
+
 
 def functions(path, names):
     tree = ast.parse(path.read_text())
