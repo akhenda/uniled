@@ -20,6 +20,9 @@ class HybridDevice:
     controller, or None when no connectable advertisement is available.
     """
 
+    # Class attribute so __getattr__ never forwards it to the active device.
+    on_network_failure: Callable[[], None] | None = None
+
     def __init__(self, network: Any, fallback_factory: Callable[[], Awaitable[Any]]):
         self._network = network
         self._fallback_factory = fallback_factory
@@ -108,6 +111,8 @@ class HybridDevice:
                     self._available = True
                     return True
                 await self._network.stop()
+                if self.on_network_failure:
+                    self.on_network_failure()
                 self._next_network_attempt = time.monotonic() + NETWORK_RETRY_SECONDS
 
             fallback = await self._get_fallback()

@@ -15,6 +15,8 @@ from homeassistant.helpers.update_coordinator import (
     UpdateFailed,
 )
 
+from .const import CONF_UL_TRANSPORT, UNILED_TRANSPORT_NET
+from .discovery import async_request_rescan
 from .lib.device import UniledDevice
 
 _LOGGER = logging.getLogger(__name__)
@@ -74,6 +76,8 @@ class UniledUpdateCoordinator(DataUpdateCoordinator):
                 except Exception as ex:
                     raise ConfigEntryError(str(ex)) from ex
             if not success:
+                if self.entry.data.get(CONF_UL_TRANSPORT) == UNILED_TRANSPORT_NET:
+                    async_request_rescan(self.hass)
                 raise UpdateFailed("Device update failed")
         else:
             pass

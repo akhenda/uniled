@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
+import ipaddress
 import logging
 import select
 import socket
@@ -18,6 +20,20 @@ from .device import UNILED_TRANSPORT_NET, UniledDevice
 
 # _LOGGER = logging.getLogger(__name__)
 _LOGGER = logging.getLogger("uniled_scanner")
+
+# A /22: big enough for a home VLAN, small enough that a typo cannot flood a network.
+MAX_SWEEP_ADDRESSES = 1024
+
+
+def parse_discovery_networks(values: list[str]) -> list[ipaddress.IPv4Network]:
+    """Parse CIDRs to sweep by unicast; raise ValueError on bad or oversized ones."""
+    networks = []
+    for value in values:
+        network = ipaddress.IPv4Network(str(value).strip(), strict=False)
+        if network.num_addresses > MAX_SWEEP_ADDRESSES:
+            raise ValueError(f"{value} is larger than a /22")
+        networks.append(network)
+    return networks
 
 
 class UniledNetScanner:
@@ -217,6 +233,48 @@ class UniledNetScanner:
                 if self._process_response(data, addr, address, self._discoveries):
                     found_all = True
                     break
+        return self.found_devices
+
+    async def async_sweep(
+        self, networks: list[ipaddress.IPv4Network], timeout: float = 10
+    ) -> list[UniledDiscovery]:
+        """Probe every host of the networks by unicast; broadcasts stay in one subnet."""
+        loop = asyncio.get_running_loop()
+        hosts = [str(host) for network in networks for host in network.hosts()]
+        sock = self._create_socket()
+
+        async def _receive() -> None:
+            while True:
+                try:
+                    data, addr = await loop.sock_recvfrom(sock, self.MAX_RESPONSE_SIZE)
+                except OSError as err:
+                    _LOGGER.debug("Sweep receive error: %s", err)
+                    await asyncio.sleep(0.1)
+                    continue
+                self._process_response(data, addr, None, self._discoveries)
+
+        receiver = loop.create_task(_receive())
+        try:
+            # Two rounds: the second re-probes silent hosts in case a packet was lost.
+            for _ in range(2):
+                for idx, host in enumerate(hosts):
+                    if host in self._discoveries:
+                        continue
+                    try:
+                        sock.sendto(
+                            self.SPNET_DISCOVERY_MESSAGE,
+                            (host, self.SPNET_DISCOVERY_PORT),
+                        )
+                    except OSError as err:
+                        _LOGGER.debug("Sweep send to %s failed: %s", host, err)
+                    if idx % 8 == 7:
+                        await asyncio.sleep(0.01)  # pace the burst
+                await asyncio.sleep(timeout / 2)
+        finally:
+            receiver.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await receiver
+            sock.close()
         return self.found_devices
 
     @property

@@ -76,6 +76,19 @@ first try using the applicable Android/IOS app and ensure the device name is set
 model then attempt adding the device into Home Assistant. If it still fails, enable debugging (see below) in Home Assistant, re-attempt adding the device, then open an issue attaching the debug log 
 output to assist with further invetigation.
 
+### 🌐 WiFi Devices on Another Subnet or VLAN
+
+Network discovery is a UDP broadcast, which never crosses a router. If your WiFi controllers live
+on another subnet, list it in `configuration.yaml` and restart Home Assistant. UniLED then probes
+each address in those networks too, finds the devices by MAC, and follows them when their IP changes.
+Each network can be at most a /22.
+
+```yaml
+uniled:
+  discovery_networks:
+    - 10.10.30.0/24
+```
+
 ## 🪲 Debugging
 
 To debug the integration, add the following to your `configuration.yaml`

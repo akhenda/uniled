@@ -33,16 +33,19 @@ from homeassistant.helpers import (
     device_registry as dr,
     entity_registry as er,
 )
+from homeassistant.helpers.debounce import Debouncer
 from homeassistant.helpers.dispatcher import async_dispatcher_connect
 from homeassistant.helpers.event import (
     # async_track_time_change,
     async_track_time_interval,
 )
 from homeassistant.helpers.typing import ConfigType
+import voluptuous as vol
 
 from .const import (
     ATTR_UL_MAC_ADDRESS,
     ATTR_UL_MODEL_NAME,
+    CONF_DISCOVERY_NETWORKS,
     CONF_UL_TRANSPORT as CONF_TRANSPORT,
     DOMAIN,
     UNILED_COMMAND_SETTLE_DELAY,
@@ -53,6 +56,8 @@ from .const import (
     UNILED_DISCOVERY_SIGNAL,
     #    UNILED_DISCOVERY_STARTUP_TIMEOUT,
     UNILED_OPTIONS_ATTRIBUTES,
+    UNILED_RESCAN,
+    UNILED_RESCAN_COOLDOWN,
 )
 from .coordinator import UniledUpdateCoordinator
 from .discovery import (
@@ -60,6 +65,7 @@ from .discovery import (
     async_clear_discovery_cache,
     async_discover_device,
     async_discover_devices,
+    async_request_rescan,
     async_trigger_discovery,
 )
 from .lib.ble.device import (
@@ -72,6 +78,7 @@ from .lib.ble.device import (
 from .lib.hybrid import HybridDevice
 from .lib.mac import same_mac
 from .lib.net.device import UNILED_TRANSPORT_NET, UniledNetDevice
+from .lib.net.scanner import parse_discovery_networks
 from .lib.zng.manager import (
     CONF_ZNG_ACTIVE_SCAN as CONF_ACTIVE_SCAN,
     CONF_ZNG_MESH_ID as CONF_MESH_ID,
@@ -96,6 +103,28 @@ PLATFORMS: list[Platform] = [
 # CONFIG_SCHEMA = cv.config_entry_only_config_schema(DOMAIN)
 
 
+def _discovery_networks(value: list[str]) -> list:
+    """Validate CIDRs for the unicast sweep."""
+    try:
+        return parse_discovery_networks(value)
+    except ValueError as err:
+        raise vol.Invalid(str(err)) from err
+
+
+CONFIG_SCHEMA = vol.Schema(
+    {
+        vol.Optional(DOMAIN): vol.Schema(
+            {
+                vol.Optional(CONF_DISCOVERY_NETWORKS, default=[]): vol.All(
+                    cv.ensure_list, [cv.string], _discovery_networks
+                )
+            }
+        )
+    },
+    extra=vol.ALLOW_EXTRA,
+)
+
+
 async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
     """Set up the UNILED component."""
 
@@ -109,6 +138,18 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
     async def _async_discovery(*_: Any) -> None:
         async_trigger_discovery(
             hass, await async_discover_devices(hass, UNILED_DISCOVERY_SCAN_TIMEOUT)
+        )
+
+    networks = config.get(DOMAIN, {}).get(CONF_DISCOVERY_NETWORKS, [])
+    domain_data = hass.data.setdefault(DOMAIN, {})
+    domain_data[CONF_DISCOVERY_NETWORKS] = networks
+    if networks:
+        domain_data[UNILED_RESCAN] = Debouncer(
+            hass,
+            _LOGGER,
+            cooldown=UNILED_RESCAN_COOLDOWN,
+            immediate=True,
+            function=_async_discovery,
         )
 
     @callback
@@ -218,6 +259,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                     f"'directed_discovery[ATTR_UL_MODEL_NAME]'"
                 )
             discovery = directed_discovery
+        else:
+            # The host may have a new IP; a rescan finds it by MAC.
+            async_request_rescan(hass)
 
         if entry.unique_id and (mac := discovery.get(ATTR_UL_MAC_ADDRESS)):
             mac = dr.format_mac(cast(str, mac))
@@ -249,6 +293,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 return UniledBleDevice(entry.options, ble_device, info.advertisement, "SP530E")
 
             hybrid = HybridDevice(uniled, _async_create_ble_fallback)
+            hybrid.on_network_failure = lambda: async_request_rescan(hass)
 
             @callback
             def _async_update_fallback(service_info, change) -> None:

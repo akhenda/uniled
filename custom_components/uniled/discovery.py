@@ -22,10 +22,12 @@ from .const import (
     ATTR_UL_LOCAL_NAME,
     ATTR_UL_MAC_ADDRESS,
     ATTR_UL_MODEL_NAME,
+    CONF_DISCOVERY_NETWORKS,
     CONF_UL_TRANSPORT as CONF_TRANSPORT,
     DOMAIN,
     UNILED_DISCOVERY,
     UNILED_DISCOVERY_DIRECTED_TIMEOUT,
+    UNILED_RESCAN,
 )
 from .lib.device import UniledDevice
 from .lib.discovery import CONF_TO_DISCOVERY, UniledDiscovery
@@ -160,14 +162,19 @@ async def async_discover_devices(
         ]
 
     scanner = UniledScanner()
+    scans = [
+        scanner.async_scan(timeout=timeout, address=address) for address in targets
+    ]
+    # Broadcasts never cross subnets, so probe configured networks host by host.
+    if (
+        not address
+        and hass
+        and (networks := hass.data.get(DOMAIN, {}).get(CONF_DISCOVERY_NETWORKS))
+    ):
+        targets.append(", ".join(map(str, networks)))
+        scans.append(scanner.async_sweep(networks, timeout))
     for idx, discovered in enumerate(
-        await asyncio.gather(
-            *[
-                scanner.async_scan(timeout=timeout, address=address)
-                for address in targets
-            ],
-            return_exceptions=True,
-        )
+        await asyncio.gather(*scans, return_exceptions=True)
     ):
         if isinstance(discovered, Exception):
             _LOGGER.debug(
@@ -215,6 +222,13 @@ def async_trigger_discovery(
             context={"source": config_entries.SOURCE_INTEGRATION_DISCOVERY},
             data={**device},
         )
+
+
+@callback
+def async_request_rescan(hass: HomeAssistant) -> None:
+    """Rescan soon after a network failure; the debouncer limits how often."""
+    if debouncer := hass.data.get(DOMAIN, {}).get(UNILED_RESCAN):
+        hass.async_create_task(debouncer.async_call())
 
 
 @callback
